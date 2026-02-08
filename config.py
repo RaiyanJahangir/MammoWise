@@ -444,3 +444,28 @@ MEDGEMMA_PROMPT_SUSPICION = """
                     "suspicion": "<Healthy|Benign|Suspicious>"
                 }
 """
+
+# ----------------------------
+# Augmentation: VinDr merged
+# ----------------------------
+AUG_VINDR_IN_IMAGES_DIR   = Path("...") 
+AUG_VINDR_IN_REPORTS_DIR  = Path("...")
+
+AUG_VINDR_OUT_IMAGES_DIR  = Path("...")
+AUG_VINDR_OUT_REPORTS_DIR = Path("...")
+
+# Target counts per BI-RADS class
+AUG_TARGET_PER_CLASS = {
+    1: 500,
+    2: 500,
+    3: 500,
+    4: 500,
+    5: 200,
+}
+
+# Image extensions to search for (priority order)
+AUG_IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".dcm"]
+
+# Reproducibility + safety
+AUG_SEED = 1337
+AUG_DRY_RUN = False

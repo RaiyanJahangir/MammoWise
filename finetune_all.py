@@ -9,28 +9,42 @@ from trl import SFTConfig, SFTTrainer
 
 
 PROMPT = """
-                You are a certified breast radiologist with lots of experience
+                You are a board certified breast radiologist with lots of experience
                 in interpreting screening mammograms. You are meticulous,
                 and always provide clear, concise, and clinically actionable reports.
 
                 You are provided with a mammogram image. The image has all 4 breast views shown together.
-                The upper two views are the Cranio-Caudal (CC) views of each breast, right and left, shown as a symmetric layout,
+                The upper two views are the Cranio-Caudal (CC) views of each breast, right and left,
                 and the lower two views are the Medio-Lateral Oblique (MLO) views of each breast, right and left.
 
-                Your task is to analyze the mammogram images and determine the density of the breast tissue. 
-                Darker color indicates fatty tissue while lighter color indicates denser tissue.
-                It is easier to see the abnormalities in less dense breasts and gets more difficult as the density increases.
-                
-                Classify the breast density using the ACR classification, which includes:
+                At first, you should identify the breast density using the ACR classification,
+                which includes:
                 - ACR A: Almost entirely fatty
                 - ACR B: Scattered fibroglandular densities
                 - ACR C: Heterogeneously dense
                 - ACR D: Extremely dense
 
+                Then, you should summarize any findings from the images. Mention in which view the findings
+                are present. Findings include
+                Mass, Suspicious Calcification, Architectural Distortion, Asymmetry, Focal Asymmetry, Global Asymmetry,
+                Suspicious Lymph Nodes, Nipple Retraction, Skin Retraction, Skin Thickening.
+                There may be multiple findings in a single image. For normal and healthy breasts, "Healthy Breast. No Findings"
 
-                 Here is the JSON format you should follow for your response:
+                Finally, assign a BIRADS category based on the findings:
+                - BIRADS 1: Negative (no abnormalities)
+                - BIRADS 2: Benign (no suspicion of cancer)
+                - BIRADS 3: Probably benign (short-term follow-up recommended)
+                - BIRADS 4: Suspicious abnormality (biopsy needed)
+                - BIRADS 5: Highly suggestive of malignancy (high probability of cancer)
+
+                Also assign the healthy status of the breast.
+
+                Here is the JSON format you should follow for your response:
                 {
-                    "breast_density": "<ACR A|B|C|D> followed by a brief description of the density"
+                    "breast_density": "<ACR A|B|C|D> followed by a brief description of the density",
+                    "findings": "<Summary of any abnormalities as described above>",
+                    "birads": "<0|1|2|3|4|5|6> followed by a brief description of the BIRADS category>",
+                    "suspicion":"healthy|benign|suspicious"
                 }
 
 
@@ -38,36 +52,36 @@ PROMPT = """
 
 
 def format_data(example: dict[str, Any]) -> dict[str, Any]:
-    # pull the integer birads label
-    y = example["density"]
-
-    # keep the prompt the same; make assistant output a tiny JSON with only birads
-    # target_text = f'{{"birads": "{y}"}}'
-    target_text = str(y)
-
     example["messages"] = [
         {
             "role": "user",
             "content": [
-                {"type": "image"},
-                {"type": "text", "text": PROMPT},
+                {
+                    "type": "image",
+                },
+                {
+                    "type": "text",
+                    "text": PROMPT,
+                },
             ],
         },
         {
             "role": "assistant",
             "content": [
-                {"type": "text", "text": target_text},
+                {
+                    "type": "text",
+                    "text": example["label"],
+                },
             ],
         },
     ]
+    # print("Formatted example:", example["label"])
     return example
-
 
 
 
 dataset_path = "..."  # Replace this with the dataset dict folder
 dataset = load_from_disk(dataset_path)
-
 # row = dataset["train"][0]
 # print(row["image"])
 # print(row["label"])
@@ -77,8 +91,9 @@ data = dataset.map(format_data)
 
 
 
-model_id = "google/medgemma-4b-it"
-
+# model_id = "google/medgemma-4b-it"
+# model_id = "google/medgemma-1.5-4b-it"
+model_id = "google/medgemma-27b-it"
 # Check if GPU supports bfloat16
 # if torch.cuda.get_device_capability()[0] < 8:
 #     raise ValueError("GPU does not support bfloat16, please use a GPU that supports bfloat16.")
@@ -107,12 +122,18 @@ bnb = BitsAndBytesConfig(
 )
 
 model = AutoModelForCausalLM.from_pretrained(
-    "google/medgemma-4b-it",
+    # "google/medgemma-4b-it",
+    # "google/medgemma-1.5-4b-it",
+    "google/medgemma-27b-it",
+    quantization_config=bnb,
     device_map="balanced",      # or "balanced"
     dtype="float16",
     low_cpu_mem_usage=True,
 )
 
+
+model.gradient_checkpointing_enable()
+model.config.use_cache = False
 
 tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
 processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
@@ -134,15 +155,16 @@ processor.tokenizer.padding_side = "right"
 peft_config = LoraConfig(
     lora_alpha=16,
     lora_dropout=0.05,
-    r=16,
+    # r=16,
+    r=8,
     bias="none",
     # target_modules="all-linear",
     target_modules=["q_proj","k_proj","v_proj","o_proj"], # adjust if needed
     task_type="CAUSAL_LM",
-    modules_to_save=[
-        "lm_head",
-        "embed_tokens",
-    ],
+    # modules_to_save=[
+    #     "lm_head",
+    #     "embed_tokens",
+    # ],
 )
 
 
@@ -163,7 +185,7 @@ def collate_fn(examples):
         texts.append(chat)
 
     batch = processor(text=texts, images=images, return_tensors="pt",
-                      padding=True, truncation=True, max_length=1024)
+                      padding=True, truncation=True, max_length=512)
 
     labels = batch["input_ids"].clone()
 
@@ -186,7 +208,7 @@ def collate_fn(examples):
     return batch
 
 
-num_train_epochs = 6  # @param {type: "number"}
+num_train_epochs = 1  # @param {type: "number"}
 learning_rate = 2e-4  # @param {type: "number"}
 
 
@@ -202,14 +224,16 @@ args = SFTConfig(
     gradient_accumulation_steps=8,
     gradient_checkpointing=True,
     # optim="adamw_torch_fused",
-    optim="adamw_bnb_8bit",
+    # optim="adamw_bnb_8bit",
+    optim="paged_adamw_8bit",
     logging_steps=50,
 
     # IMPORTANT: correct key is evaluation_strategy
+    eval_accumulation_steps=4,
     eval_strategy="steps",
-    eval_steps=50,
+    eval_steps=200,
     save_strategy="steps",
-    save_steps=50,
+    save_steps=200,
 
     # Keep only 1 checkpoint locally (minimizes disk use)
     save_total_limit=2,
@@ -246,10 +270,10 @@ trainer = SFTTrainer(
     processing_class=processor,
     data_collator=collate_fn,
     # compute_metrics=your_compute_metrics_fn,  # uncomment if using a custom metric
-    # callbacks=[EarlyStoppingCallback(
-    #     early_stopping_patience=10,        # stop if no improvement in 10 evals
-    #     early_stopping_threshold=0.0      # require strictly better (set >0 to require a margin)
-    # )]
+    callbacks=[EarlyStoppingCallback(
+       early_stopping_patience=10,        # stop if no improvement in 10 evals
+       early_stopping_threshold=0.0      # require strictly better (set >0 to require a margin)
+    )]
 )
 
 trainer.train()
